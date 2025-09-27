@@ -845,16 +845,32 @@ func (g *Game) getGameResults() []PlayerResult {
 
 func (g *Game) handleGameOverInput() {
 	if rl.IsKeyPressed(rl.KeyEnter) || rl.IsKeyPressed(rl.KeySpace) {
-		g.State = StateMenu
-		g.MenuSelection = 0
-		// Reset for next match
-		g.GameTime = 0
-		g.NetworkPlayers = make(map[int]*NetworkPlayer)
-		g.LobbyReady = false
-		g.GameStarted = false
-		if g.ServerConn != nil {
-			g.ServerConn.Close()
-			g.ServerConn = nil
+		// If we were in multiplayer mode, return to lobby for easy LAN party mode
+		if g.IsHost || g.ServerConn != nil {
+			g.State = StateLobby
+			// Reset game state but keep network connections
+			g.GameTime = 0
+			g.LobbyReady = false
+			g.GameStarted = false
+			// Generate new objects for next game
+			g.generateObjects()
+			// Reset player but keep network players connected
+			g.Player = Hole{
+				Position:  Vector2{X: worldWidth / 2, Y: worldHeight / 2},
+				Size:      20.0,
+				Score:     0,
+				Speed:     200.0,
+				Animation: 0.0,
+			}
+		} else {
+			// Single player mode - return to menu
+			g.State = StateMenu
+			g.MenuSelection = 0
+			// Reset for next match
+			g.GameTime = 0
+			g.NetworkPlayers = make(map[int]*NetworkPlayer)
+			g.LobbyReady = false
+			g.GameStarted = false
 		}
 	}
 }
