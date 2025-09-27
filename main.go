@@ -485,16 +485,28 @@ func (g *Game) update(deltaTime float32) {
 		return
 	case StateGameplay:
 		// Continue with normal game update
-	}
-
-	// Clean up old network players
-	for id, player := range g.NetworkPlayers {
-		if time.Since(player.LastSeen) > 5*time.Second {
-			delete(g.NetworkPlayers, id)
+		// Only update game time during gameplay
+		if g.GameTime < g.MaxGameTime {
+			g.GameTime += deltaTime
 		}
+
+		// Clean up old network players
+		for id, player := range g.NetworkPlayers {
+			if time.Since(player.LastSeen) > 5*time.Second {
+				delete(g.NetworkPlayers, id)
+			}
+		}
+		g.Player.Animation += deltaTime * 2.0
+
+		// Check for game over and matchmaking
+		if g.GameTime >= g.MaxGameTime {
+			g.State = StateMenu
+			g.showResults()
+			return
+		}
+	default:
+		return
 	}
-	g.GameTime += deltaTime
-	g.Player.Animation += deltaTime * 2.0
 
 	// Handle input
 	if rl.IsKeyDown(rl.KeyW) || rl.IsKeyDown(rl.KeyUp) {
@@ -623,14 +635,9 @@ func (g *Game) update(deltaTime float32) {
 		}
 	}
 
-	// Check for game over and matchmaking
-	if g.GameTime >= g.MaxGameTime {
-		g.State = StateMenu
-		g.showResults()
-	}
 }
 
-func (g *Game) drawGradientCircle(x, y, radius float32, innerColor, outerColor rl.Color) {
+func (g *Game) drawGradientCircle(x float32, y float32, radius float32, innerColor rl.Color, outerColor rl.Color) {
 	steps := int32(radius / 2)
 	if steps < 8 {
 		steps = 8
@@ -903,9 +910,8 @@ func main() {
 	for !rl.WindowShouldClose() {
 		deltaTime := rl.GetFrameTime()
 
-		if game.GameTime < game.MaxGameTime {
-			game.update(deltaTime)
-		}
+		// Always update, but handle different states inside update function
+		game.update(deltaTime)
 
 		game.draw()
 	}
