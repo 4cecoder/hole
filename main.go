@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -64,6 +65,7 @@ const (
 	StateSinglePlayer
 	StateMultiplayerHost
 	StateMultiplayerClient
+	StateLobby
 	StateGameplay
 )
 
@@ -71,6 +73,13 @@ type NetworkMessage struct {
 	Type     string      `json:"type"`
 	PlayerID int         `json:"player_id"`
 	Data     interface{} `json:"data"`
+}
+
+type LobbyUpdate struct {
+	PlayerCount int    `json:"player_count"`
+	GameStarted bool   `json:"game_started"`
+	HostReady   bool   `json:"host_ready"`
+	ServerIP    string `json:"server_ip,omitempty"`
 }
 
 type PlayerUpdate struct {
@@ -98,16 +107,45 @@ type Game struct {
 	ServerIP        string
 	InputText       string
 	InputActive     bool
+	LobbyReady      bool
+	MinPlayers      int
+	LocalIP         string
+	GameStarted     bool
+}
+
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				ipStr := ipNet.IP.String()
+				// Prefer 192.168.x.x or 10.x.x.x ranges for LAN
+				if strings.HasPrefix(ipStr, "192.168.") || strings.HasPrefix(ipStr, "10.") {
+					return ipStr
+				}
+			}
+		}
+	}
+	return "127.0.0.1"
 }
 
 func NewGame() *Game {
 	rand.Seed(time.Now().UnixNano())
+	localIP := getLocalIP()
 	return &Game{
 		State:          StateMenu,
 		NetworkPlayers: make(map[int]*NetworkPlayer),
 		MenuSelection:  0,
 		PlayerID:       rand.Intn(10000),
-		ServerIP:       "127.0.0.1:8080",
+		ServerIP:       localIP + ":8080",
+		LocalIP:        localIP,
+		MinPlayers:     2,
+		LobbyReady:     false,
+		GameStarted:    false,
 	}
 }
 
@@ -336,12 +374,72 @@ func (g *Game) handleMenuInput() {
 		case 1: // Host Multiplayer
 			g.startServer()
 			g.initSinglePlayer()
-			g.State = StateGameplay
+			g.State = StateLobby
 		case 2: // Join Multiplayer
 			g.InputActive = true
 			g.InputText = g.ServerIP
 		}
 	}
+}
+
+func (g *Game) handleLobbyInput() {
+	if rl.IsKeyPressed(rl.KeySpace) {
+		g.LobbyReady = !g.LobbyReady
+		if g.IsHost {
+			// Host can start game if minimum players reached
+			if len(g.NetworkPlayers)+1 >= g.MinPlayers && g.LobbyReady {
+				g.startGame()
+			}
+		}
+		g.sendLobbyUpdate()
+	}
+	if rl.IsKeyPressed(rl.KeyEscape) {
+		// Return to menu
+		g.State = StateMenu
+		g.LobbyReady = false
+		g.GameStarted = false
+		if g.ServerConn != nil {
+			g.ServerConn.Close()
+			g.ServerConn = nil
+		}
+	}
+}
+
+func (g *Game) sendLobbyUpdate() {
+	update := LobbyUpdate{
+		PlayerCount: len(g.NetworkPlayers) + 1,
+		GameStarted: g.GameStarted,
+		HostReady:   g.LobbyReady,
+	}
+	if g.IsHost {
+		update.ServerIP = g.LocalIP + ":8080"
+	}
+
+	msg := NetworkMessage{
+		Type:     "lobby_update",
+		PlayerID: g.PlayerID,
+		Data:     update,
+	}
+
+	data, _ := json.Marshal(msg)
+	if g.IsHost {
+		// Send to all clients
+		for _, conn := range g.ClientConns {
+			conn.Write(data)
+			conn.Write([]byte("\n"))
+		}
+	} else if g.ServerConn != nil {
+		// Send to server
+		g.ServerConn.Write(data)
+		g.ServerConn.Write([]byte("\n"))
+	}
+}
+
+func (g *Game) startGame() {
+	g.GameStarted = true
+	g.State = StateGameplay
+	g.GameTime = 0
+	g.sendLobbyUpdate()
 }
 
 func (g *Game) handleTextInput() {
@@ -396,12 +494,18 @@ func (g *Game) connectToServer() {
 		}
 		g.ServerConn = conn
 		g.initSinglePlayer()
-		g.State = StateGameplay
+		g.State = StateLobby
 		go g.handleServerMessages()
+		// Send initial lobby update to announce joining
+		time.Sleep(100 * time.Millisecond) // Brief delay to ensure connection
+		g.sendLobbyUpdate()
 	}()
 }
 
 func (g *Game) handleClient(conn net.Conn) {
+	// Send initial lobby state to new client
+	g.sendLobbyUpdate()
+
 	decoder := json.NewDecoder(conn)
 	for {
 		var msg NetworkMessage
@@ -409,6 +513,10 @@ func (g *Game) handleClient(conn net.Conn) {
 			break
 		}
 		g.processNetworkMessage(msg)
+		// Broadcast lobby updates to all clients when someone joins
+		if msg.Type == "lobby_update" {
+			g.sendLobbyUpdate()
+		}
 	}
 	conn.Close()
 }
@@ -444,6 +552,27 @@ func (g *Game) processNetworkMessage(msg NetworkMessage) {
 		player.Hole.Score = update.Score
 		player.Hole.Animation = update.Animation
 		player.LastSeen = time.Now()
+	case "lobby_update":
+		data, _ := json.Marshal(msg.Data)
+		var update LobbyUpdate
+		json.Unmarshal(data, &update)
+		// Add player to lobby if not already present
+		if g.NetworkPlayers[msg.PlayerID] == nil {
+			colors := []rl.Color{rl.Red, rl.Blue, rl.Green, rl.Yellow, rl.Purple, rl.Orange}
+			g.NetworkPlayers[msg.PlayerID] = &NetworkPlayer{
+				ID:    msg.PlayerID,
+				Name:  fmt.Sprintf("Player %d", msg.PlayerID),
+				Color: colors[msg.PlayerID%len(colors)],
+				LastSeen: time.Now(),
+			}
+		} else {
+			g.NetworkPlayers[msg.PlayerID].LastSeen = time.Now()
+		}
+		// If game started, transition to gameplay
+		if update.GameStarted && g.State == StateLobby {
+			g.State = StateGameplay
+			g.GameTime = 0
+		}
 	}
 }
 
@@ -482,6 +611,9 @@ func (g *Game) update(deltaTime float32) {
 		} else {
 			g.handleMenuInput()
 		}
+		return
+	case StateLobby:
+		g.handleLobbyInput()
 		return
 	case StateGameplay:
 		// Continue with normal game update
@@ -740,6 +872,10 @@ func (g *Game) drawMenu() {
 		rl.DrawText("Press ENTER to connect, ESC to cancel", screenWidth/2-120, 500, 14, rl.Gray)
 	}
 
+	// Show LAN IP for hosting
+	rl.DrawText(fmt.Sprintf("Your LAN IP: %s:8080", g.LocalIP), screenWidth/2-100, 550, 18, rl.Yellow)
+	rl.DrawText("(Share this IP with friends to join your game)", screenWidth/2-140, 575, 14, rl.LightGray)
+
 	// Instructions
 	rl.DrawText("Use UP/DOWN arrows and ENTER to select", screenWidth/2-160, screenHeight-100, 18, rl.Gray)
 	rl.DrawText("Timed matches - Top 3 players shown at end", screenWidth/2-170, screenHeight-70, 16, rl.DarkGray)
@@ -748,9 +884,92 @@ func (g *Game) drawMenu() {
 	rl.EndDrawing()
 }
 
+func (g *Game) drawLobby() {
+	rl.BeginDrawing()
+
+	// Gradient background
+	rl.DrawRectangleGradientV(0, 0, screenWidth, screenHeight,
+		rl.Color{R: 25, G: 25, B: 112, A: 255}, // Midnight blue
+		rl.Color{R: 0, G: 0, B: 0, A: 255})     // Black
+
+	// Title
+	if g.IsHost {
+		rl.DrawText("HOSTING LOBBY", screenWidth/2-120, 50, 40, rl.Yellow)
+		rl.DrawText(fmt.Sprintf("Server: %s:8080", g.LocalIP), screenWidth/2-100, 100, 20, rl.White)
+	} else {
+		rl.DrawText("JOINED LOBBY", screenWidth/2-110, 50, 40, rl.Green)
+		rl.DrawText(fmt.Sprintf("Connected to: %s", g.ServerIP), screenWidth/2-120, 100, 18, rl.White)
+	}
+
+	// Player list
+	rl.DrawText("PLAYERS:", 50, 150, 30, rl.White)
+	yPos := 190
+
+	// Draw your player
+	readyStatus := "NOT READY"
+	readyColor := rl.Red
+	if g.LobbyReady {
+		readyStatus = "READY"
+		readyColor = rl.Green
+	}
+	rl.DrawText(fmt.Sprintf("You (Player %d) - %s", g.PlayerID, readyStatus), 60, int32(yPos), 24, readyColor)
+	yPos += 35
+
+	// Draw network players
+	for _, player := range g.NetworkPlayers {
+		rl.DrawText(fmt.Sprintf("%s - CONNECTED", player.Name), 60, int32(yPos), 24, player.Color)
+		yPos += 35
+	}
+
+	// Status and instructions
+	playerCount := len(g.NetworkPlayers) + 1
+	rl.DrawText(fmt.Sprintf("Players: %d/%d minimum", playerCount, g.MinPlayers), 50, 400, 20, rl.White)
+
+	if g.IsHost {
+		if playerCount >= g.MinPlayers {
+			if g.LobbyReady {
+				rl.DrawText("READY TO START! Game will begin shortly...", 50, 450, 20, rl.Green)
+			} else {
+				rl.DrawText("Press SPACE to ready up and start the game", 50, 450, 20, rl.Yellow)
+			}
+		} else {
+			rl.DrawText(fmt.Sprintf("Waiting for %d more players...", g.MinPlayers-playerCount), 50, 450, 20, rl.Orange)
+		}
+	} else {
+		if g.LobbyReady {
+			rl.DrawText("READY - Waiting for host to start", 50, 450, 20, rl.Green)
+		} else {
+			rl.DrawText("Press SPACE to ready up", 50, 450, 20, rl.Yellow)
+		}
+	}
+
+	// Controls
+	rl.DrawText("SPACE - Ready/Unready", 50, screenHeight-80, 18, rl.Gray)
+	rl.DrawText("ESC - Return to Menu", 50, screenHeight-50, 18, rl.Gray)
+
+	// Connection indicator
+	if g.IsHost {
+		rl.DrawText("◆ HOST", screenWidth-100, 20, 20, rl.Yellow)
+	} else {
+		connStatus := "◆ CONNECTED"
+		connColor := rl.Green
+		if g.ServerConn == nil {
+			connStatus = "◆ DISCONNECTED"
+			connColor = rl.Red
+		}
+		rl.DrawText(connStatus, screenWidth-150, 20, 20, connColor)
+	}
+
+	rl.EndDrawing()
+}
+
 func (g *Game) draw() {
 	if g.State == StateMenu {
 		g.drawMenu()
+		return
+	}
+	if g.State == StateLobby {
+		g.drawLobby()
 		return
 	}
 	rl.BeginDrawing()
