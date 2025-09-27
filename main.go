@@ -12,11 +12,14 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
+var (
+	screenWidth  = int32(1200)
+	screenHeight = int32(800)
+)
+
 const (
-	screenWidth  = 1200
-	screenHeight = 800
-	worldWidth   = 2400
-	worldHeight  = 1600
+	worldWidth  = 2400
+	worldHeight = 1600
 )
 
 type Vector2 struct {
@@ -159,7 +162,7 @@ func (g *Game) initSinglePlayer() {
 		Animation: 0.0,
 	}
 	g.Camera = rl.Camera2D{
-		Offset:   rl.Vector2{X: screenWidth / 2, Y: screenHeight / 2},
+		Offset:   rl.Vector2{X: float32(screenWidth) / 2, Y: float32(screenHeight) / 2},
 		Target:   rl.Vector2{X: worldWidth / 2, Y: worldHeight / 2},
 		Rotation: 0.0,
 		Zoom:     1.0,
@@ -656,7 +659,7 @@ func (g *Game) update(deltaTime float32) {
 
 	// Handle mouse movement
 	mousePos := rl.GetMousePosition()
-	screenCenter := Vector2{X: screenWidth / 2, Y: screenHeight / 2}
+	screenCenter := Vector2{X: float32(screenWidth) / 2, Y: float32(screenHeight) / 2}
 	direction := Vector2{
 		X: mousePos.X - screenCenter.X,
 		Y: mousePos.Y - screenCenter.Y,
@@ -701,7 +704,8 @@ func (g *Game) update(deltaTime float32) {
 	// Smooth zoom transition
 	g.Camera.Zoom += (targetZoom - g.Camera.Zoom) * deltaTime * 2.0
 
-	// Update camera to follow player
+	// Update camera to follow player and handle window resizing
+	g.Camera.Offset = rl.Vector2{X: float32(screenWidth) / 2, Y: float32(screenHeight) / 2}
 	g.Camera.Target = rl.Vector2{X: g.Player.Position.X, Y: g.Player.Position.Y}
 
 	// Update particles
@@ -1122,12 +1126,19 @@ func (g *Game) draw() {
 
 func main() {
 	rl.InitWindow(screenWidth, screenHeight, "Hole.io Clone - Raylib Go")
+	rl.SetWindowState(rl.FlagWindowResizable)
 	rl.SetTargetFPS(60)
 
 	game := NewGame()
 
 	for !rl.WindowShouldClose() {
 		deltaTime := rl.GetFrameTime()
+
+		// Update screen dimensions if window was resized
+		if rl.IsWindowResized() {
+			screenWidth = int32(rl.GetScreenWidth())
+			screenHeight = int32(rl.GetScreenHeight())
+		}
 
 		// Always update, but handle different states inside update function
 		game.update(deltaTime)
