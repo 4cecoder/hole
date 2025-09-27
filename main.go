@@ -70,6 +70,7 @@ const (
 	StateMultiplayerClient
 	StateLobby
 	StateGameplay
+	StateGameOver
 )
 
 type NetworkMessage struct {
@@ -170,6 +171,9 @@ func (g *Game) initSinglePlayer() {
 	g.GameTime = 0.0
 	g.MaxGameTime = 120.0 // 2 minutes like the original
 	g.BaseZoom = 1.0
+
+	// Lock mouse cursor to the game window during gameplay
+	rl.DisableCursor()
 
 	g.generateObjects()
 }
@@ -401,6 +405,8 @@ func (g *Game) handleLobbyInput() {
 		g.State = StateMenu
 		g.LobbyReady = false
 		g.GameStarted = false
+		// Release mouse cursor when returning to menu
+		rl.EnableCursor()
 		if g.ServerConn != nil {
 			g.ServerConn.Close()
 			g.ServerConn = nil
@@ -442,6 +448,10 @@ func (g *Game) startGame() {
 	g.GameStarted = true
 	g.State = StateGameplay
 	g.GameTime = 0
+
+	// Lock mouse cursor to the game window during multiplayer gameplay
+	rl.DisableCursor()
+
 	g.sendLobbyUpdate()
 }
 
@@ -618,6 +628,9 @@ func (g *Game) update(deltaTime float32) {
 	case StateLobby:
 		g.handleLobbyInput()
 		return
+	case StateGameOver:
+		g.handleGameOverInput()
+		return
 	case StateGameplay:
 		// Continue with normal game update
 		// Only update game time during gameplay
@@ -635,8 +648,9 @@ func (g *Game) update(deltaTime float32) {
 
 		// Check for game over and matchmaking
 		if g.GameTime >= g.MaxGameTime {
-			g.State = StateMenu
-			g.showResults()
+			g.State = StateGameOver
+			// Release mouse cursor when game ends
+			rl.EnableCursor()
 			return
 		}
 	default:
@@ -798,14 +812,13 @@ func (g *Game) drawGradientCircle(x float32, y float32, radius float32, innerCol
 	}
 }
 
-func (g *Game) showResults() {
-	// Collect all players for leaderboard
-	type PlayerResult struct {
-		Name  string
-		Size  float32
-		Score int
-	}
+type PlayerResult struct {
+	Name  string
+	Size  float32
+	Score int
+}
 
+func (g *Game) getGameResults() []PlayerResult {
 	results := []PlayerResult{
 		{Name: "You", Size: g.Player.Size, Score: g.Player.Score},
 	}
@@ -827,19 +840,22 @@ func (g *Game) showResults() {
 		}
 	}
 
-	fmt.Println("\n=== MATCH RESULTS ===")
-	for i, result := range results {
-		if i < 3 { // Top 3
-			fmt.Printf("%d. %s - Size: %.1f, Score: %d\n", i+1, result.Name, result.Size, result.Score)
-		}
-	}
-	fmt.Println("===================\n")
+	return results
+}
 
-	// Reset for next match
-	g.GameTime = 0
-	g.NetworkPlayers = make(map[int]*NetworkPlayer)
-	if g.State == StateMenu {
+func (g *Game) handleGameOverInput() {
+	if rl.IsKeyPressed(rl.KeyEnter) || rl.IsKeyPressed(rl.KeySpace) {
+		g.State = StateMenu
 		g.MenuSelection = 0
+		// Reset for next match
+		g.GameTime = 0
+		g.NetworkPlayers = make(map[int]*NetworkPlayer)
+		g.LobbyReady = false
+		g.GameStarted = false
+		if g.ServerConn != nil {
+			g.ServerConn.Close()
+			g.ServerConn = nil
+		}
 	}
 }
 
@@ -967,6 +983,83 @@ func (g *Game) drawLobby() {
 	rl.EndDrawing()
 }
 
+func (g *Game) drawGameOver() {
+	rl.BeginDrawing()
+
+	// Gradient background
+	rl.DrawRectangleGradientV(0, 0, screenWidth, screenHeight,
+		rl.Color{R: 25, G: 25, B: 112, A: 255}, // Midnight blue
+		rl.Color{R: 0, G: 0, B: 0, A: 255})     // Black
+
+	// Game Over title
+	rl.DrawText("GAME OVER!", screenWidth/2-150, 50, 50, rl.Red)
+
+	// Get results
+	results := g.getGameResults()
+
+	// Show final results
+	rl.DrawText("FINAL RESULTS", screenWidth/2-120, 120, 30, rl.Yellow)
+
+	// Show top 3 players prominently
+	rl.DrawText("TOP 3 PLAYERS", screenWidth/2-100, 180, 25, rl.Yellow)
+
+	yPos := 220
+	for i := 0; i < 3 && i < len(results); i++ {
+		result := results[i]
+
+		rankColor := rl.White
+		prefix := ""
+		fontSize := int32(28)
+
+		// Special styling for top 3
+		switch i {
+		case 0:
+			rankColor = rl.Gold
+			prefix = "🥇 WINNER! "
+			fontSize = 32
+		case 1:
+			rankColor = rl.Color{R: 192, G: 192, B: 192, A: 255} // Silver
+			prefix = "🥈 2nd Place "
+		case 2:
+			rankColor = rl.Color{R: 205, G: 127, B: 50, A: 255} // Bronze
+			prefix = "🥉 3rd Place "
+		}
+
+		text := fmt.Sprintf("%s%s - Size: %.1f, Score: %d", prefix, result.Name, result.Size, result.Score)
+		rl.DrawText(text, 50, int32(yPos), fontSize, rankColor)
+		yPos += 50
+	}
+
+	// Show remaining players if any
+	if len(results) > 3 {
+		rl.DrawText("Other Players:", 50, int32(yPos+20), 20, rl.Gray)
+		for i := 3; i < len(results) && i < 8; i++ {
+			result := results[i]
+			text := fmt.Sprintf("%d. %s - Size: %.1f, Score: %d", i+1, result.Name, result.Size, result.Score)
+			rl.DrawText(text, 60, int32(yPos+50+(i-3)*25), 18, rl.LightGray)
+		}
+	}
+
+	// Your final stats
+	rl.DrawText("YOUR STATS:", 50, int32(yPos+40), 20, rl.Yellow)
+	rl.DrawText(fmt.Sprintf("Final Size: %.1f", g.Player.Size), 60, int32(yPos+70), 18, rl.White)
+	rl.DrawText(fmt.Sprintf("Final Score: %d", g.Player.Score), 60, int32(yPos+95), 18, rl.White)
+
+	// Calculate rank
+	rank := 1
+	for _, result := range results {
+		if result.Name != "You" && result.Size > g.Player.Size {
+			rank++
+		}
+	}
+	rl.DrawText(fmt.Sprintf("Your Rank: #%d", rank), 60, int32(yPos+120), 18, rl.Green)
+
+	// Instructions
+	rl.DrawText("Press ENTER or SPACE to return to menu", screenWidth/2-180, screenHeight-100, 20, rl.LightGray)
+
+	rl.EndDrawing()
+}
+
 func (g *Game) draw() {
 	if g.State == StateMenu {
 		g.drawMenu()
@@ -974,6 +1067,10 @@ func (g *Game) draw() {
 	}
 	if g.State == StateLobby {
 		g.drawLobby()
+		return
+	}
+	if g.State == StateGameOver {
+		g.drawGameOver()
 		return
 	}
 	rl.BeginDrawing()
